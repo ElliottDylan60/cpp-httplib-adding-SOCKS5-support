@@ -1687,7 +1687,7 @@ public:
 
   void set_interface(const std::string &intf);
 
-  void set_proxy(const std::string &host, int port);
+  void set_proxy(const std::string &host, int port, bool socks);
   void set_proxy_basic_auth(const std::string &username,
                             const std::string &password);
   void set_proxy_bearer_token_auth(const std::string &token);
@@ -1810,6 +1810,7 @@ protected:
 
   std::string proxy_host_;
   int proxy_port_ = -1;
+  bool proxy_socks_ = false;
 
   std::string proxy_basic_auth_username_;
   std::string proxy_basic_auth_password_;
@@ -2070,7 +2071,7 @@ public:
 
   void set_interface(const std::string &intf);
 
-  void set_proxy(const std::string &host, int port);
+  void set_proxy(const std::string &host, int port, bool socks);
   void set_proxy_basic_auth(const std::string &username,
                             const std::string &password);
   void set_proxy_bearer_token_auth(const std::string &token);
@@ -2503,7 +2504,7 @@ bool process_client_socket(
     std::function<bool(Stream &)> callback);
 
 socket_t create_client_socket(const std::string &host, const std::string &ip,
-                              int port, int address_family, bool tcp_nodelay,
+                              int port, bool socks, int address_family, bool tcp_nodelay,
                               bool ipv6_v6only, SocketOptions socket_options,
                               time_t connection_timeout_sec,
                               time_t connection_timeout_usec,
@@ -4184,8 +4185,31 @@ inline ssize_t read_socket(socket_t sock, void *ptr, size_t size, int flags) {
   });
 }
 
-inline ssize_t send_socket(socket_t sock, const void *ptr, size_t size,
-                           int flags) {
+inline ssize_t send_socket(socket_t sock, const void *ptr, size_t size, int flags) {
+  
+  std::cout << "send_socket" << std::endl;
+  std::cout << "ptr " << static_cast<const char *>(ptr) << std::endl;
+  std::cout << "ptr " << &ptr << std::endl;
+  std::cout << "size " << size << std::endl;
+  std::cout << "flags " << flags << std::endl;
+
+  std::cout << "SOCKS5 CONNECT to domain" << std::endl;
+  unsigned char req[512];
+  const char* onion = "o5ycdjoiwlwn2x37ozy5gc4hzaepmctf7xgnchriarqjmnt6dzj7fnyd.onion";  
+  
+  int len = strlen(onion);
+  req[0] = 0x05; // version
+  req[1] = 0x01; // connect
+  req[2] = 0x00; // reserved
+  req[3] = 0x03; // domain
+  req[4] = len;
+  memcpy(req + 5, onion, len);
+  req[5 + len]     = (80 >> 8) & 0xFF;
+  req[6 + len]     = 80 & 0xFF;
+
+  send(sock, req, 7 + len, 0);
+  recv(sock, req, 10, 0); // ignore reply details
+
   return handle_EINTR([&]() {
     return send(sock,
 #ifdef _WIN32
@@ -4824,12 +4848,13 @@ template <typename BindOrConnect>
 socket_t create_socket(const std::string &host, const std::string &ip, int port,
                        int address_family, int socket_flags, bool tcp_nodelay,
                        bool ipv6_v6only, SocketOptions socket_options,
-                       BindOrConnect bind_or_connect, time_t timeout_sec = 0) {
+                       BindOrConnect bind_or_connect, time_t timeout_sec = 0, bool socks = false) {
+  std::cout << "create_socket" << std::endl;
   // Get address info
   const char *node = nullptr;
   struct addrinfo hints;
   struct addrinfo *result;
-
+  
   memset(&hints, 0, sizeof(struct addrinfo));
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_protocol = IPPROTO_IP;
@@ -4849,14 +4874,12 @@ socket_t create_socket(const std::string &host, const std::string &ip, int port,
   if (hints.ai_family == AF_UNIX) {
     const auto addrlen = host.length();
     if (addrlen > sizeof(sockaddr_un::sun_path)) { return INVALID_SOCKET; }
-
 #ifdef SOCK_CLOEXEC
     auto sock = socket(hints.ai_family, hints.ai_socktype | SOCK_CLOEXEC,
                        hints.ai_protocol);
 #else
     auto sock = socket(hints.ai_family, hints.ai_socktype, hints.ai_protocol);
 #endif
-
     if (sock != INVALID_SOCKET) {
       sockaddr_un addr{};
       addr.sun_family = AF_UNIX;
@@ -4881,13 +4904,13 @@ socket_t create_socket(const std::string &host, const std::string &ip, int port,
       // remove the option.
       detail::set_socket_opt(sock, SOL_SOCKET, SO_REUSEADDR, 0);
 #endif
-
       bool dummy;
       if (!bind_or_connect(sock, hints, dummy)) {
         close_socket(sock);
         sock = INVALID_SOCKET;
       }
     }
+    
     return sock;
   }
 #endif
@@ -4927,7 +4950,6 @@ socket_t create_socket(const std::string &host, const std::string &ip, int port,
       sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
     }
 #else
-
 #ifdef SOCK_CLOEXEC
     auto sock =
         socket(rp->ai_family, rp->ai_socktype | SOCK_CLOEXEC, rp->ai_protocol);
@@ -4954,8 +4976,20 @@ socket_t create_socket(const std::string &host, const std::string &ip, int port,
     if (socket_options) { socket_options(sock); }
 
     // bind or connect
+    if(socks){
+      std::cout << "Connect to SOCKS5 port" << std::endl;
+      connect(sock, result->ai_addr, result->ai_addrlen);
+
+      std::cout << "SOCKS5 handshake (no auth)" << std::endl;
+      unsigned char hello[] = {0x05, 0x01, 0x00};
+      send(sock, hello, 3, 0);
+      recv(sock, hello, 2, 0);
+      return sock;
+    }
     auto quit = false;
-    if (bind_or_connect(sock, *rp, quit)) { return sock; }
+    if (bind_or_connect(sock, *rp, quit)) { 
+      return sock; 
+    }
 
     close_socket(sock);
 
@@ -5054,7 +5088,7 @@ inline std::string if2ip(int address_family, const std::string &ifn) {
 #endif
 
 inline socket_t create_client_socket(
-    const std::string &host, const std::string &ip, int port,
+    const std::string &host, const std::string &ip, int port, bool socks,
     int address_family, bool tcp_nodelay, bool ipv6_v6only,
     SocketOptions socket_options, time_t connection_timeout_sec,
     time_t connection_timeout_usec, time_t read_timeout_sec,
@@ -5102,7 +5136,7 @@ inline socket_t create_client_socket(
         error = Error::Success;
         return true;
       },
-      connection_timeout_sec); // Pass DNS timeout
+      connection_timeout_sec, socks); // Pass DNS timeout
 
   if (sock != INVALID_SOCKET) {
     error = Error::Success;
@@ -5888,6 +5922,7 @@ inline ssize_t write_request_line(Stream &strm, const std::string &method,
   s += ' ';
   s += path;
   s += " HTTP/1.1\r\n";
+  std::cout << "writing to socket stream" << std::endl;
   return strm.write(s.data(), s.size());
 }
 
@@ -9924,6 +9959,7 @@ inline void ClientImpl::copy_settings(const ClientImpl &rhs) {
   interface_ = rhs.interface_;
   proxy_host_ = rhs.proxy_host_;
   proxy_port_ = rhs.proxy_port_;
+  proxy_socks_ = rhs.proxy_socks_;
   proxy_basic_auth_username_ = rhs.proxy_basic_auth_username_;
   proxy_basic_auth_password_ = rhs.proxy_basic_auth_password_;
   proxy_bearer_token_auth_token_ = rhs.proxy_bearer_token_auth_token_;
@@ -9948,7 +9984,7 @@ inline void ClientImpl::copy_settings(const ClientImpl &rhs) {
 inline socket_t ClientImpl::create_client_socket(Error &error) const {
   if (!proxy_host_.empty() && proxy_port_ != -1) {
     return detail::create_client_socket(
-        proxy_host_, std::string(), proxy_port_, address_family_, tcp_nodelay_,
+        proxy_host_, std::string(), proxy_port_, proxy_socks_, address_family_, tcp_nodelay_,
         ipv6_v6only_, socket_options_, connection_timeout_sec_,
         connection_timeout_usec_, read_timeout_sec_, read_timeout_usec_,
         write_timeout_sec_, write_timeout_usec_, interface_, error);
@@ -9960,7 +9996,7 @@ inline socket_t ClientImpl::create_client_socket(Error &error) const {
   if (it != addr_map_.end()) { ip = it->second; }
 
   return detail::create_client_socket(
-      host_, ip, port_, address_family_, tcp_nodelay_, ipv6_v6only_,
+      host_, ip, port_, proxy_socks_, address_family_, tcp_nodelay_, ipv6_v6only_,
       socket_options_, connection_timeout_sec_, connection_timeout_usec_,
       read_timeout_sec_, read_timeout_usec_, write_timeout_sec_,
       write_timeout_usec_, interface_, error);
@@ -10771,7 +10807,7 @@ inline void ClientImpl::setup_redirect_client(ClientType &client) {
   // before proxy auth)
   if (!proxy_host_.empty() && proxy_port_ != -1) {
     // First set proxy host and port
-    client.set_proxy(proxy_host_, proxy_port_);
+    client.set_proxy(proxy_host_, proxy_port_, proxy_socks_);
 
     // Then set proxy authentication (order matters!)
     if (!proxy_basic_auth_username_.empty()) {
@@ -12166,9 +12202,10 @@ inline void ClientImpl::set_interface(const std::string &intf) {
   interface_ = intf;
 }
 
-inline void ClientImpl::set_proxy(const std::string &host, int port) {
+inline void ClientImpl::set_proxy(const std::string &host, int port, bool socks=false) {
   proxy_host_ = host;
   proxy_port_ = port;
+  proxy_socks_ = socks;
 }
 
 inline void ClientImpl::set_proxy_basic_auth(const std::string &username,
@@ -13826,8 +13863,8 @@ inline void Client::set_interface(const std::string &intf) {
   cli_->set_interface(intf);
 }
 
-inline void Client::set_proxy(const std::string &host, int port) {
-  cli_->set_proxy(host, port);
+inline void Client::set_proxy(const std::string &host, int port, bool socks = false) {
+  cli_->set_proxy(host, port, socks);
 }
 inline void Client::set_proxy_basic_auth(const std::string &username,
                                          const std::string &password) {
