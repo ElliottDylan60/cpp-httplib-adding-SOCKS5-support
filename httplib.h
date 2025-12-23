@@ -4910,7 +4910,6 @@ socket_t create_socket(const std::string &host, const std::string &ip, int port,
         sock = INVALID_SOCKET;
       }
     }
-    
     return sock;
   }
 #endif
@@ -4984,6 +4983,8 @@ socket_t create_socket(const std::string &host, const std::string &ip, int port,
       unsigned char hello[] = {0x05, 0x01, 0x00};
       send(sock, hello, 3, 0);
       recv(sock, hello, 2, 0);
+
+      std::cout << "Connect to host through socket " << host << std::endl;
       return sock;
     }
     auto quit = false;
@@ -4995,7 +4996,6 @@ socket_t create_socket(const std::string &host, const std::string &ip, int port,
 
     if (quit) { break; }
   }
-
   return INVALID_SOCKET;
 }
 
@@ -5143,7 +5143,6 @@ inline socket_t create_client_socket(
   } else {
     if (error == Error::Success) { error = Error::Connection; }
   }
-
   return sock;
 }
 
@@ -5922,7 +5921,7 @@ inline ssize_t write_request_line(Stream &strm, const std::string &method,
   s += ' ';
   s += path;
   s += " HTTP/1.1\r\n";
-  std::cout << "writing to socket stream" << std::endl;
+  std::cout << "writing to socket stream " << s << std::endl;
   return strm.write(s.data(), s.size());
 }
 
@@ -9982,6 +9981,7 @@ inline void ClientImpl::copy_settings(const ClientImpl &rhs) {
 }
 
 inline socket_t ClientImpl::create_client_socket(Error &error) const {
+
   if (!proxy_host_.empty() && proxy_port_ != -1) {
     return detail::create_client_socket(
         proxy_host_, std::string(), proxy_port_, proxy_socks_, address_family_, tcp_nodelay_,
@@ -10586,7 +10586,7 @@ inline bool ClientImpl::handle_request(Stream &strm, Request &req,
 
   bool ret;
 
-  if (!is_ssl() && !proxy_host_.empty() && proxy_port_ != -1) {
+  if (!is_ssl() && !proxy_host_.empty() && proxy_port_ != -1 && !proxy_socks_) {
     auto req2 = req;
     req2.path = "http://" + host_and_port_ + req.path;
     ret = process_request(strm, req2, res, close_connection, error);
