@@ -1687,6 +1687,8 @@ public:
 
   void set_interface(const std::string &intf);
 
+  void connect_socks_proxy(socket_t &sock);
+
   void set_proxy(const std::string &host, int port, bool socks);
   void set_proxy_basic_auth(const std::string &username,
                             const std::string &password);
@@ -4186,30 +4188,6 @@ inline ssize_t read_socket(socket_t sock, void *ptr, size_t size, int flags) {
 }
 
 inline ssize_t send_socket(socket_t sock, const void *ptr, size_t size, int flags) {
-  
-  std::cout << "send_socket" << std::endl;
-  std::cout << "ptr " << static_cast<const char *>(ptr) << std::endl;
-  std::cout << "ptr " << &ptr << std::endl;
-  std::cout << "size " << size << std::endl;
-  std::cout << "flags " << flags << std::endl;
-
-  std::cout << "SOCKS5 CONNECT to domain" << std::endl;
-  unsigned char req[512];
-  const char* onion = "o5ycdjoiwlwn2x37ozy5gc4hzaepmctf7xgnchriarqjmnt6dzj7fnyd.onion";  
-  
-  int len = strlen(onion);
-  req[0] = 0x05; // version
-  req[1] = 0x01; // connect
-  req[2] = 0x00; // reserved
-  req[3] = 0x03; // domain
-  req[4] = len;
-  memcpy(req + 5, onion, len);
-  req[5 + len]     = (80 >> 8) & 0xFF;
-  req[6 + len]     = 80 & 0xFF;
-
-  send(sock, req, 7 + len, 0);
-  recv(sock, req, 10, 0); // ignore reply details
-
   return handle_EINTR([&]() {
     return send(sock,
 #ifdef _WIN32
@@ -4849,7 +4827,6 @@ socket_t create_socket(const std::string &host, const std::string &ip, int port,
                        int address_family, int socket_flags, bool tcp_nodelay,
                        bool ipv6_v6only, SocketOptions socket_options,
                        BindOrConnect bind_or_connect, time_t timeout_sec = 0, bool socks = false) {
-  std::cout << "create_socket" << std::endl;
   // Get address info
   const char *node = nullptr;
   struct addrinfo hints;
@@ -4976,15 +4953,14 @@ socket_t create_socket(const std::string &host, const std::string &ip, int port,
 
     // bind or connect
     if(socks){
-      std::cout << "Connect to SOCKS5 port" << std::endl;
+      // connect to socks5 port
       connect(sock, result->ai_addr, result->ai_addrlen);
 
-      std::cout << "SOCKS5 handshake (no auth)" << std::endl;
+      //SOCKS5 handshake (no auth)
       unsigned char hello[] = {0x05, 0x01, 0x00};
       send(sock, hello, 3, 0);
       recv(sock, hello, 2, 0);
 
-      std::cout << "Connect to host through socket " << host << std::endl;
       return sock;
     }
     auto quit = false;
@@ -5921,7 +5897,6 @@ inline ssize_t write_request_line(Stream &strm, const std::string &method,
   s += ' ';
   s += path;
   s += " HTTP/1.1\r\n";
-  std::cout << "writing to socket stream " << s << std::endl;
   return strm.write(s.data(), s.size());
 }
 
@@ -9988,6 +9963,7 @@ inline socket_t ClientImpl::create_client_socket(Error &error) const {
         ipv6_v6only_, socket_options_, connection_timeout_sec_,
         connection_timeout_usec_, read_timeout_sec_, read_timeout_usec_,
         write_timeout_sec_, write_timeout_usec_, interface_, error);
+        
   }
 
   // Check is custom IP specified for host_
@@ -10004,8 +9980,12 @@ inline socket_t ClientImpl::create_client_socket(Error &error) const {
 
 inline bool ClientImpl::create_and_connect_socket(Socket &socket,
                                                   Error &error) {
+  
   auto sock = create_client_socket(error);
   if (sock == INVALID_SOCKET) { return false; }
+  if(proxy_socks_){
+    connect_socks_proxy(sock);
+  }
   socket.sock = sock;
   return true;
 }
@@ -12200,6 +12180,23 @@ inline void ClientImpl::set_decompress(bool on) { decompress_ = on; }
 
 inline void ClientImpl::set_interface(const std::string &intf) {
   interface_ = intf;
+}
+
+inline void ClientImpl::connect_socks_proxy(socket_t &sock) {
+  unsigned char req[512];
+
+  int len = strlen(host_.c_str());
+  req[0] = 0x05; // version
+  req[1] = 0x01; // connect
+  req[2] = 0x00; // reserved
+  req[3] = 0x03; // domain
+  req[4] = len;
+  memcpy(req + 5, host_.c_str(), len);
+  req[5 + len]     = (80 >> 8) & 0xFF;
+  req[6 + len]     = 80 & 0xFF;
+
+  ::send(sock, req, 7 + len, 0);
+  recv(sock, req, 10, 0); // ignore reply details
 }
 
 inline void ClientImpl::set_proxy(const std::string &host, int port, bool socks=false) {
